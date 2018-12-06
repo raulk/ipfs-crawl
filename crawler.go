@@ -1,9 +1,10 @@
-package main
+package crawl
 
 import (
 	"context"
 	crand "crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"log"
 	mrand "math/rand"
 	"time"
@@ -21,16 +22,18 @@ type Crawler struct {
 	ctx context.Context
 	h   host.Host
 	dht *dht.IpfsDHT
-	out *CrawlLog
 
 	peers map[peer.ID]struct{}
 	work  chan pstore.PeerInfo
+
+	Discovered chan pstore.PeerInfo
 }
 
-func NewCrawler(ctx context.Context, h host.Host, dht *dht.IpfsDHT, out *CrawlLog) *Crawler {
-	c := &Crawler{ctx: ctx, h: h, dht: dht, out: out,
-		peers: make(map[peer.ID]struct{}),
-		work:  make(chan pstore.PeerInfo, WORKERS),
+func NewCrawler(ctx context.Context, h host.Host, dht *dht.IpfsDHT) *Crawler {
+	c := &Crawler{ctx: ctx, h: h, dht: dht,
+		peers:      make(map[peer.ID]struct{}),
+		work:       make(chan pstore.PeerInfo, WORKERS),
+		Discovered: make(chan pstore.PeerInfo, 256),
 	}
 
 	for i := 0; i < WORKERS; i++ {
@@ -43,7 +46,6 @@ func NewCrawler(ctx context.Context, h host.Host, dht *dht.IpfsDHT, out *CrawlLo
 func (c *Crawler) Crawl() {
 	anchor := make([]byte, 32)
 	for {
-
 		_, err := crand.Read(anchor)
 		if err != nil {
 			log.Fatal(err)
@@ -53,7 +55,7 @@ func (c *Crawler) Crawl() {
 		c.crawlFromAnchor(str)
 
 		select {
-		case <-time.After(60 * time.Second):
+		case <-time.After(5 * time.Second):
 		case <-c.ctx.Done():
 			return
 		}
@@ -61,7 +63,7 @@ func (c *Crawler) Crawl() {
 }
 
 func (c *Crawler) crawlFromAnchor(key string) {
-	log.Printf("Crawling from anchor %s\n", key)
+	// fmt.Printf("Crawling from anchor %s\n", key)
 
 	ctx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
 	pch, err := c.dht.GetClosestPeers(ctx, key)
@@ -76,7 +78,7 @@ func (c *Crawler) crawlFromAnchor(key string) {
 	}
 	cancel()
 
-	log.Printf("Found %d peers", len(ps))
+	// fmt.Printf("Found %d peers\n", len(ps))
 	for _, p := range ps {
 		c.crawlPeer(p)
 	}
@@ -88,14 +90,14 @@ func (c *Crawler) crawlPeer(p peer.ID) {
 		return
 	}
 
-	log.Printf("Crawling peer %s", p.Pretty())
+	// fmt.Printf("Crawling peer %s\n", p.Pretty())
 
 	ctx, cancel := context.WithTimeout(c.ctx, 60*time.Second)
 	pi, err := c.dht.FindPeer(ctx, p)
 	cancel()
 
 	if err != nil {
-		log.Printf("Peer not found %s: %s", p.Pretty(), err.Error())
+		// fmt.Printf("Peer not found %s: %s\n", p.Pretty(), err.Error())
 		return
 	}
 
@@ -110,7 +112,7 @@ func (c *Crawler) crawlPeer(p peer.ID) {
 	pch, err := c.dht.FindPeersConnectedToPeer(ctx, p)
 
 	if err != nil {
-		log.Printf("Can't find peers connected to peer %s: %s", p.Pretty(), err.Error())
+		// fmt.Printf("Can't find peers connected to peer %s: %s\n", p.Pretty(), err.Error())
 		cancel()
 		return
 	}
@@ -121,7 +123,7 @@ func (c *Crawler) crawlPeer(p peer.ID) {
 	}
 	cancel()
 
-	log.Printf("Peer %s is connected to %d peers", p.Pretty(), len(ps))
+	// fmt.Printf("Peer %s is connected to %d peers\n", p.Pretty(), len(ps))
 
 	for _, p := range ps {
 		c.crawlPeer(p)
@@ -152,7 +154,7 @@ func (c *Crawler) tryConnect(pi pstore.PeerInfo) {
 	var cancel func()
 
 again:
-	log.Printf("Connecting to %s (%d)", pi.ID.Pretty(), len(pi.Addrs))
+	// fmt.Printf("Connecting to %s (%d)\n", pi.ID.Pretty(), len(pi.Addrs))
 	ctx, cancel = context.WithTimeout(c.ctx, 60*time.Second)
 
 	err := c.h.Connect(ctx, pi)
@@ -163,23 +165,22 @@ again:
 		backoff++
 		if backoff < 7 {
 			dt := 1000 + mrand.Intn(backoff*10000)
-			log.Printf("Backing off dialing %s", pi.ID.Pretty())
+			// fmt.Printf("Backing off dialing %s\n", pi.ID.Pretty())
 			time.Sleep(time.Duration(dt) * time.Millisecond)
 			goto again
 		} else {
-			log.Printf("FAILED to connect to %s; giving up from dial backoff", pi.ID.Pretty())
-			c.out.LogError(pi, err)
+			// fmt.Printf("FAILED to connect to %s; giving up from dial backoff\n", pi.ID.Pretty())
 		}
 	case err != nil:
-		log.Printf("FAILED to connect to %s: %s", pi.ID.Pretty(), err.Error())
-		c.out.LogError(pi, err)
+		// fmt.Printf("FAILED to connect to %s: %s", pi.ID.Pretty(), err.Error())
 	default:
-		log.Printf("CONNECTED to %s", pi.ID.Pretty())
+		// fmt.Printf("CONNECTED to %s", pi.ID.Pretty())
+
+		c.Discovered <- pi
+
 		conns := c.h.Network().ConnsToPeer(pi.ID)
 		if len(conns) == 0 {
-			log.Printf("ERROR: supposedly connected, but no conns to peer", pi.ID.Pretty())
-		} else {
-			c.out.LogConnect(conns[0].RemoteMultiaddr(), pi)
+			fmt.Println("ERROR: supposedly connected, but no conns to peer", pi.ID.Pretty())
 		}
 	}
 }
